@@ -266,21 +266,29 @@ echo "Wayland socket ready at $SOCKET_PATH"
 ln -sf "$SOCKET_PATH" "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
 chmod 777 "$SOCKET_PATH"
 
-# Start WayVNC with authentication as waydroid user
+# Ensure WayVNC config enforces authentication
+if ! grep -q "^enable_auth=true" /home/waydroid/.config/wayvnc/config; then
+    echo "ERROR: WayVNC authentication is not enabled in the config file"
+    kill $SWAY_PID 2>/dev/null || true
+    exit 1
+fi
+
+# Start WayVNC with configuration and authentication enforced
 echo "Starting WayVNC on port 5900 as $DISPLAY_USER..."
 # WayVNC will connect to the Wayland socket via WAYLAND_DISPLAY environment variable
-# Use nohup to prevent SIGHUP when su exits
 WAYVNC_ENV="XDG_RUNTIME_DIR=$DISPLAY_XDG_RUNTIME_DIR WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
-nohup su -c "$WAYVNC_ENV wayvnc 0.0.0.0 5900" $DISPLAY_USER > /dev/null 2>&1 &
+su -c "$WAYVNC_ENV wayvnc -C /home/waydroid/.config/wayvnc/config" $DISPLAY_USER &
+WAYVNC_PID=$!
+
+# Give WayVNC a moment to bind the socket
 sleep 3
 
-# Verify WayVNC started by checking if port 5900 is listening
-# Note: We can't check PID because nohup exits immediately
+# Verify WayVNC started by checking PID and port
 WAYVNC_RETRY=0
 WAYVNC_MAX_RETRIES=10
 WAYVNC_RUNNING=false
 while [ $WAYVNC_RETRY -lt $WAYVNC_MAX_RETRIES ]; do
-    if ss -tlnp | grep -q ':5900'; then
+    if kill -0 $WAYVNC_PID 2>/dev/null && ss -tlnp | grep -q ':5900'; then
         WAYVNC_RUNNING=true
         break
     fi
@@ -294,6 +302,7 @@ if [ "$WAYVNC_RUNNING" = "false" ]; then
     echo "  WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
     echo "  Socket exists: $([ -S "$SOCKET_PATH" ] && echo 'yes' || echo 'no')"
     echo "  Sway running: $(kill -0 $SWAY_PID 2>/dev/null && echo 'yes' || echo 'no')"
+    echo "  WayVNC pid alive: $(kill -0 $WAYVNC_PID 2>/dev/null && echo 'yes' || echo 'no')"
     kill $SWAY_PID 2>/dev/null || true
     exit 1
 fi
