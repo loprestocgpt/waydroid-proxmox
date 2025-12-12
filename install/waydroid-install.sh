@@ -212,6 +212,10 @@ if [ -z "$WAYLAND_DISPLAY" ]; then
     exit 1
 fi
 
+mkdir -p /run/user/0
+chown root:root /run/user/0
+chmod 700 /run/user/0
+
 ln -sf "${DISPLAY_XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}" "/run/user/0/${WAYLAND_DISPLAY}"
 chmod 660 "${DISPLAY_XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}"
 
@@ -247,6 +251,15 @@ set -euo pipefail
 DISPLAY_USER="waydroid"
 DISPLAY_UID=$(id -u "$DISPLAY_USER")
 DISPLAY_XDG_RUNTIME_DIR="/run/user/${DISPLAY_UID}"
+
+if [ ! -d "/var/lib/waydroid/overlay" ]; then
+    INIT_ARGS=("-f")
+    if [ "${USE_GAPPS:-yes}" = "yes" ]; then
+        INIT_ARGS=("-s" "GAPPS" "-f")
+    fi
+
+    waydroid init "${INIT_ARGS[@]}"
+fi
 
 systemctl start waydroid-container.service
 
