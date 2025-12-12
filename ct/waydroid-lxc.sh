@@ -135,19 +135,14 @@ run_health_checks() {
     fi
 
     # Check systemd services were created
-    if [ ! -f /etc/systemd/system/waydroid-vnc.service ]; then
-        msg_error "waydroid-vnc.service file not created"
-        checks_passed=false
-    else
-        msg_ok "waydroid-vnc.service created"
-    fi
-
-    if [ ! -f /etc/systemd/system/waydroid-api.service ]; then
-        msg_error "waydroid-api.service file not created"
-        checks_passed=false
-    else
-        msg_ok "waydroid-api.service created"
-    fi
+    for svc in waydroid-sway.service waydroid-vnc.service waydroid.service waydroid-api.service; do
+        if [ ! -f "/etc/systemd/system/${svc}" ]; then
+            msg_error "${svc} file not created"
+            checks_passed=false
+        else
+            msg_ok "${svc} created"
+        fi
+    done
 
     # Check startup script
     if [ ! -x /usr/local/bin/start-waydroid.sh ]; then
@@ -482,21 +477,135 @@ chmod 600 /root/vnc-password.txt
 msg_ok "WayVNC Configuration Created (Password: /root/vnc-password.txt)"
 
 msg_info "Creating Startup Scripts"
-cat > /usr/local/bin/start-waydroid.sh <<EOFSCRIPT
+MESA_DRIVER=""
+LIBVA_DRIVER=""
+SOFTWARE_GL=""
+SOFTWARE_WLR=""
+
+if [ "$SOFTWARE_RENDERING" != "1" ]; then
+    case $GPU_TYPE in
+        intel)
+            MESA_DRIVER="iris"
+            LIBVA_DRIVER="iHD"
+            ;;
+        amd)
+            MESA_DRIVER="radeonsi"
+            LIBVA_DRIVER="radeonsi"
+            ;;
+    esac
+else
+    SOFTWARE_GL="1"
+    SOFTWARE_WLR="1"
+fi
+
+cat > /usr/local/bin/waydroid-sway-launch.sh <<'EOFSWAY'
+#!/bin/bash
+set -euo pipefail
+
+STATE_DIR="${STATE_DIR:-/run/waydroid}"
+export XDG_RUNTIME_DIR="${STATE_DIR}/xdg"
+export WLR_BACKENDS=headless
+export WLR_LIBINPUT_NO_DEVICES=1
+[ -n "${MESA_DRIVER:-}" ] && export MESA_LOADER_DRIVER_OVERRIDE="$MESA_DRIVER"
+[ -n "${LIBVA_DRIVER:-}" ] && export LIBVA_DRIVER_NAME="$LIBVA_DRIVER"
+[ -n "${SOFTWARE_GL:-}" ] && export LIBGL_ALWAYS_SOFTWARE="$SOFTWARE_GL"
+[ -n "${SOFTWARE_WLR:-}" ] && export WLR_RENDERER_ALLOW_SOFTWARE="$SOFTWARE_WLR"
+
+mkdir -p "$XDG_RUNTIME_DIR"
+
+systemd-notify --status="Starting sway compositor" || true
+sway &
+SWAY_PID=$!
+
+WAYLAND_DISPLAY=""
+for _ in {1..30}; do
+    sleep 1
+    for socket in "$XDG_RUNTIME_DIR"/wayland-*; do
+        if [ -S "$socket" ]; then
+            WAYLAND_DISPLAY=$(basename "$socket")
+            break
+        fi
+    done
+    [ -n "$WAYLAND_DISPLAY" ] && break
+done
+
+if [ -z "$WAYLAND_DISPLAY" ]; then
+    echo "ERROR: No Wayland socket created by sway" >&2
+    exit 1
+fi
+
+cat > "$STATE_DIR/wayland.env" <<EOF
+XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR
+WAYLAND_DISPLAY=$WAYLAND_DISPLAY
+EOF
+
+systemd-notify --ready --status="Wayland ready: $WAYLAND_DISPLAY" || true
+wait "$SWAY_PID"
+EOFSWAY
+
+chmod +x /usr/local/bin/waydroid-sway-launch.sh
+
+cat > /usr/local/bin/waydroid-wayvnc-launch.sh <<'EOFWAYVNC'
+#!/bin/bash
+set -euo pipefail
+
+STATE_DIR="${STATE_DIR:-/run/waydroid}"
+WAYLAND_ENV="$STATE_DIR/wayland.env"
+
+if [ ! -f "$WAYLAND_ENV" ]; then
+    echo "ERROR: Wayland environment not found" >&2
+    exit 1
+fi
+
+source "$WAYLAND_ENV"
+export XDG_RUNTIME_DIR
+export WAYLAND_DISPLAY
+
+systemd-notify --status="Starting wayvnc against $WAYLAND_DISPLAY" || true
+wayvnc 0.0.0.0 5900 &
+WAYVNC_PID=$!
+
+for _ in {1..30}; do
+    if ss -tln | grep -q ':5900'; then
+        systemd-notify --ready --status="WayVNC ready on 5900" || true
+        wait "$WAYVNC_PID"
+        exit 0
+    fi
+    sleep 1
+done
+
+echo "ERROR: WayVNC failed to listen on 5900" >&2
+exit 1
+EOFWAYVNC
+
+chmod +x /usr/local/bin/waydroid-wayvnc-launch.sh
+
+cat > /usr/local/bin/start-waydroid.sh <<'EOFSCRIPT'
 #!/bin/bash
 # Start Waydroid with VNC access
 
-# Set environment variables
-export XDG_RUNTIME_DIR=/run/user/0
+set -euo pipefail
 
-# GPU-specific environment variables
+STATE_DIR="${STATE_DIR:-/run/waydroid}"
+WAYLAND_ENV="$STATE_DIR/wayland.env"
+DISPLAY_USER="waydroid"
+
+if [ ! -f "$WAYLAND_ENV" ]; then
+    echo "ERROR: waydroid-sway.service did not publish a Wayland socket" >&2
+    exit 1
+fi
+
+source "$WAYLAND_ENV"
+export XDG_RUNTIME_DIR
+export WAYLAND_DISPLAY
+
 GPU_TYPE="${GPU_TYPE}"
 SOFTWARE_RENDERING="${SOFTWARE_RENDERING}"
 GPU_DEVICE="${GPU_DEVICE}"
 RENDER_NODE="${RENDER_NODE}"
 
-if [ "\$SOFTWARE_RENDERING" = "0" ]; then
-    case \$GPU_TYPE in
+if [ "$SOFTWARE_RENDERING" = "0" ]; then
+    case "$GPU_TYPE" in
         intel)
             export MESA_LOADER_DRIVER_OVERRIDE=iris
             export LIBVA_DRIVER_NAME=iHD
@@ -507,150 +616,141 @@ if [ "\$SOFTWARE_RENDERING" = "0" ]; then
             ;;
     esac
 
-    # Set specific GPU device if specified
-    if [ -n "\$GPU_DEVICE" ]; then
-        # Validate GPU_DEVICE format before using in shell operations
-        if [[ "\$GPU_DEVICE" =~ ^/dev/(dri/)?card[0-9]+$ ]]; then
-            export DRI_PRIME=\$(basename "\$GPU_DEVICE" | sed 's/card//')
-        else
-            echo "WARNING: Invalid GPU_DEVICE format, skipping DRI_PRIME configuration" >&2
-        fi
+    if [ -n "$GPU_DEVICE" ] && [[ "$GPU_DEVICE" =~ ^/dev/(dri/)?card[0-9]+$ ]]; then
+        export DRI_PRIME=$(basename "$GPU_DEVICE" | sed 's/card//')
     fi
 else
     export LIBGL_ALWAYS_SOFTWARE=1
 fi
 
-# Create runtime directory if it doesn't exist
-mkdir -p \$XDG_RUNTIME_DIR
-
-# Start Sway compositor in background
-sway &
-SWAY_PID=\$!
-
-# Wait for Sway to create Wayland socket (dynamically detect)
-echo "Waiting for Wayland socket creation..."
-RETRY_COUNT=0
-MAX_RETRIES=30
-WAYLAND_DISPLAY=""
-
-while [ -z "\$WAYLAND_DISPLAY" ] && [ \$RETRY_COUNT -lt \$MAX_RETRIES ]; do
+for _ in {1..15}; do
+    if [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ] && ss -tln | grep -q ':5900'; then
+        break
+    fi
     sleep 1
-    RETRY_COUNT=\$((RETRY_COUNT + 1))
-
-    # Check for any wayland socket
-    for socket in "\$XDG_RUNTIME_DIR"/wayland-*; do
-        if [ -S "\$socket" ]; then
-            WAYLAND_DISPLAY=\$(basename "\$socket")
-            echo "Detected Wayland socket: \$WAYLAND_DISPLAY"
-            break
-        fi
-    done
 done
 
-if [ -z "\$WAYLAND_DISPLAY" ]; then
-    echo "ERROR: No Wayland socket found after \${MAX_RETRIES}s"
-    ls -la "\$XDG_RUNTIME_DIR/" || true
+if [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
+    echo "ERROR: Wayland socket not ready" >&2
     exit 1
 fi
 
-export WAYLAND_DISPLAY
-echo "Using Wayland socket: \$WAYLAND_DISPLAY"
+if ! ss -tln | grep -q ':5900'; then
+    echo "ERROR: WayVNC not listening on port 5900" >&2
+    exit 1
+fi
 
-# Start WayVNC
-wayvnc 0.0.0.0 5900 &
-WAYVNC_PID=\$!
-
-# Initialize Waydroid if not already done
 if [ ! -d "/var/lib/waydroid/overlay" ]; then
-    echo "Initializing Waydroid..."
+    echo "Initializing Waydroid (this may take several minutes)..."
+    INIT_ENV="XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
     if [ "${USE_GAPPS}" = "yes" ]; then
-        if ! waydroid init -s GAPPS -f; then
-            echo "ERROR: Failed to initialize Waydroid with GAPPS" >&2
-            exit 1
-        fi
+        su -c "$INIT_ENV waydroid init -s GAPPS -f" ${DISPLAY_USER}
     else
-        if ! waydroid init -f; then
-            echo "ERROR: Failed to initialize Waydroid" >&2
-            exit 1
-        fi
+        su -c "$INIT_ENV waydroid init -f" ${DISPLAY_USER}
     fi
-    echo "Waydroid initialization completed successfully"
 fi
 
-# Start Waydroid container
-if ! waydroid container start; then
-    echo "ERROR: Failed to start Waydroid container" >&2
-    exit 1
-fi
+WAYDROID_ENV="XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
 
-# Start Waydroid session
-if ! waydroid session start &; then
-    echo "ERROR: Failed to start Waydroid session" >&2
-    exit 1
-fi
+echo "Starting Waydroid container as ${DISPLAY_USER}..."
+su -c "$WAYDROID_ENV waydroid container start" ${DISPLAY_USER}
 
-echo "Waydroid started. VNC available on port 5900"
-echo "Sway PID: \$SWAY_PID"
-echo "WayVNC PID: \$WAYVNC_PID"
-[ -n "\$GPU_DEVICE" ] && echo "Using GPU: \$GPU_DEVICE"
-[ -n "\$RENDER_NODE" ] && echo "Using Render Node: \$RENDER_NODE"
+echo "Starting Waydroid session as ${DISPLAY_USER}..."
+su -c "$WAYDROID_ENV waydroid session start" ${DISPLAY_USER} &
+SESSION_PID=$!
 
-# Keep script running
-wait
+systemd-notify --ready --status="Waydroid session started on $WAYLAND_DISPLAY" || true
+
+wait "$SESSION_PID"
 EOFSCRIPT
 
 chmod +x /usr/local/bin/start-waydroid.sh
-
-# Verify startup script was created and is executable
-if [ ! -x /usr/local/bin/start-waydroid.sh ]; then
-    msg_error "Failed to create executable start-waydroid.sh"
-    exit 1
-fi
-
 msg_ok "Startup Scripts Created"
 
 msg_info "Creating Systemd Service for Auto-start"
-cat > /etc/systemd/system/waydroid-vnc.service <<EOF
+
+cat > /etc/systemd/system/waydroid-sway.service <<EOF
 [Unit]
-Description=Waydroid with VNC Access
-After=network.target waydroid-container.service
-Wants=waydroid-container.service
+Description=Waydroid headless sway compositor
+After=systemd-user-sessions.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
-Type=simple
-ExecStart=/usr/local/bin/start-waydroid.sh
-ExecStartPost=/bin/sleep 10
-ExecStartPost=/bin/sh -c 'if ! pgrep -f wayvnc; then exit 1; fi'
+Type=notify
+User=waydroid
+Group=waydroid
+Environment="STATE_DIR=/run/waydroid"
+Environment="MESA_DRIVER=$MESA_DRIVER"
+Environment="LIBVA_DRIVER=$LIBVA_DRIVER"
+Environment="SOFTWARE_GL=$SOFTWARE_GL"
+Environment="SOFTWARE_WLR=$SOFTWARE_WLR"
+ExecStart=/usr/local/bin/waydroid-sway-launch.sh
+NotifyAccess=all
 Restart=on-failure
-RestartSec=15
-TimeoutStartSec=120
-TimeoutStopSec=30
-User=root
-Environment="XDG_RUNTIME_DIR=/run/user/0"
-# Watchdog
-WatchdogSec=60
-# Resource limits
-MemoryHigh=3G
-MemoryMax=4G
-CPUQuota=200%
+RestartSec=10
+RuntimeDirectory=waydroid
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Verify service file was created
-if [ ! -f /etc/systemd/system/waydroid-vnc.service ]; then
-    msg_error "Failed to create waydroid-vnc.service"
-    exit 1
-fi
+cat > /etc/systemd/system/waydroid-vnc.service <<EOF
+[Unit]
+Description=WayVNC server for Waydroid
+After=network.target waydroid-sway.service
+Requires=waydroid-sway.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
-if ! verify_exec "reload systemd daemon" systemctl daemon-reload; then
-    msg_error "Failed to reload systemd daemon"
-    exit 1
-fi
-msg_ok "Systemd Service Created"
+[Service]
+Type=notify
+User=waydroid
+Group=waydroid
+Environment="STATE_DIR=/run/waydroid"
+ExecStart=/usr/local/bin/waydroid-wayvnc-launch.sh
+NotifyAccess=all
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=120
+TimeoutStopSec=30
+RuntimeDirectory=waydroid
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/waydroid.service <<EOF
+[Unit]
+Description=Waydroid session stack
+After=waydroid-vnc.service waydroid-sway.service waydroid-container.service
+Requires=waydroid-vnc.service waydroid-sway.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=notify
+User=root
+Environment="STATE_DIR=/run/waydroid"
+Environment="GPU_TYPE=$GPU_TYPE"
+Environment="SOFTWARE_RENDERING=$SOFTWARE_RENDERING"
+Environment="GPU_DEVICE=$GPU_DEVICE"
+Environment="RENDER_NODE=$RENDER_NODE"
+ExecStart=/usr/local/bin/start-waydroid.sh
+NotifyAccess=all
+Restart=on-failure
+RestartSec=20
+TimeoutStartSec=600
+TimeoutStopSec=60
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable waydroid.service
+msg_ok "Created Waydroid services"
 
 msg_info "Creating Home Assistant Integration API"
 cat > /usr/local/bin/waydroid-api.py <<'EOFAPI'
@@ -1310,7 +1410,7 @@ msg_info "Creating API Service"
 cat > /etc/systemd/system/waydroid-api.service <<EOF
 [Unit]
 Description=Waydroid Home Assistant API
-After=waydroid-vnc.service network-online.target
+After=waydroid.service network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=300
 StartLimitBurst=5
