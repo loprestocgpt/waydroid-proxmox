@@ -22,6 +22,13 @@ Run Android applications on Proxmox using Waydroid in an LXC container with full
   - Bearer token authentication
   - App installation and management
 
+## How it works
+
+- **Wayland-first**: Waydroid runs as a Wayland client. A headless Sway compositor runs as the `waydroid` user with `XDG_RUNTIME_DIR=/run/user/<uid>` and publishes `wayland-1` in that runtime directory.
+- **VNC bridge**: `wayvnc` also runs as `waydroid`, consuming the same Wayland socket and serving VNC on `0.0.0.0:5900` with password authentication enabled by default.
+- **System services**: Systemd units run as root but use `su -s /bin/bash -c` to switch to the `waydroid` user for compositor, VNC, and UI commands. Ordering enforces `waydroid-container.service` first, then the compositor/VNC bridge, then the UI.
+- **User separation**: The dedicated `waydroid` user (default UID 995) owns the runtime directory and VNC config, while root owns system services and the convenience copy of the VNC password at `/root/vnc-password.txt`.
+
 ## Use Cases
 
 - **Smart Home Automation**: Control Android-only IoT devices from Home Assistant
@@ -65,6 +72,12 @@ Once complete, you'll receive:
 - **API Token**: Saved to `/etc/waydroid-api/token` in container
 
 First boot takes 2-3 minutes while Android initializes.
+
+### Troubleshooting and diagnostics
+
+- **Doctor script**: Run `scripts/doctor.sh` inside the container to print the `waydroid` UID, runtime directory/socket status, systemd service states, listening ports (5900 VNC, 8080 API), `waydroid status`, and the API health check.
+- **Service order**: Start/stop using system services (no `systemctl --user`): `systemctl restart waydroid-container waydroid-vnc waydroid-ui waydroid-api`.
+- **Wayland runtime**: If `wayland-1` is missing, restart `waydroid-vnc.service` to rebuild `/run/user/<uid>/wayland-1` before launching the UI.
 
 ## Requirements
 

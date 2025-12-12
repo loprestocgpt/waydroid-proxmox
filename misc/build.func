@@ -4,6 +4,20 @@
 # Co-Author: michelroegl-brunner
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENDOR_DIR="${SCRIPT_DIR}/vendor"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+require_vendor_file() {
+  local file_name="$1"
+  local file_path="$VENDOR_DIR/$file_name"
+  if [[ ! -f "$file_path" ]]; then
+    echo "[build.func] Missing vendor file: $file_path" >&2
+    exit 1
+  fi
+  echo "$file_path"
+}
+
 variables() {
   NSAPP=$(echo "${APP,,}" | tr -d ' ')              # This function sets the NSAPP variable by converting the value of the APP variable to lowercase and removing any spaces.
   var_install="${NSAPP}-install"                    # sets the var_install variable by appending "-install" to the value of NSAPP.
@@ -15,15 +29,9 @@ variables() {
   CT_TYPE=${var_unprivileged:-$CT_TYPE}
 }
 
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/api.func)
-
-if command -v curl >/dev/null 2>&1; then
-  source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/core.func)
-  load_functions
-elif command -v wget >/dev/null 2>&1; then
-  source <(wget -qO- https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/core.func)
-  load_functions
-fi
+source "$(require_vendor_file api.func)"
+source "$(require_vendor_file core.func)"
+load_functions
 # This function enables error handling in the script by setting options and defining a trap for the ERR signal.
 catch_errors() {
   set -Eeo pipefail
@@ -32,13 +40,14 @@ catch_errors() {
 
 # This function is called when an error occurs. It receives the exit code, line number, and command that caused the error, and displays an error message.
 error_handler() {
-  source /dev/stdin <<<$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/api.func)
   printf "\e[?25h"
   local exit_code="$?"
   local line_number="$1"
   local command="$2"
   local error_message="${RD}[ERROR]${CL} in line ${RD}$line_number${CL}: exit code ${RD}$exit_code${CL}: while executing command ${YW}$command${CL}"
-  post_update_to_api "failed" "${command}"
+  if declare -F post_update_to_api >/dev/null 2>&1; then
+    post_update_to_api "failed" "${command}"
+  fi
   echo -e "\n$error_message\n"
 }
 
@@ -980,7 +989,6 @@ install_script() {
       header_info
       echo -e "${INFO}${HOLD} ${GN}Using Config File on node $PVEHOST_NAME${CL}"
       METHOD="config_file"
-      source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/config-file.func)
       config_file
       break
       ;;
@@ -1011,6 +1019,68 @@ install_script() {
       ;;
     esac
   done
+}
+
+config_file() {
+  local default_path="/root/${NSAPP}.conf"
+  local cfg_path
+
+  cfg_path=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "CONFIG FILE" \
+    --inputbox "Enter the path to a config file with key=value pairs" 10 68 "$default_path" 3>&1 1>&2 2>&3) || exit_script
+
+  cfg_path=${cfg_path:-$default_path}
+
+  if [[ ! -f "$cfg_path" ]]; then
+    msg_error "Config file not found: $cfg_path"
+    exit 1
+  fi
+
+  msg_info "Loading configuration from $cfg_path"
+  while IFS='=' read -r raw_key raw_value; do
+    [[ -z "$raw_key" || "$raw_key" =~ ^# ]] && continue
+
+    local key value
+    key="${raw_key// /}"
+    value="$(echo "$raw_value" | sed 's/^ *//;s/ *$//' | sed 's/^"//;s/"$//')"
+
+    case "${key,,}" in
+    ct_id|ctid)
+      CT_ID="$value"
+      ;;
+    hostname)
+      HOSTNAME="$value"
+      ;;
+    var_cpu|cpu|cores)
+      var_cpu="$value"
+      ;;
+    var_ram|ram|memory)
+      var_ram="$value"
+      ;;
+    var_disk|disk|disk_size|storage)
+      var_disk="$value"
+      ;;
+    var_os|os)
+      var_os="$value"
+      ;;
+    var_version|version)
+      var_version="$value"
+      ;;
+    var_unprivileged|unprivileged|ct_type)
+      CT_TYPE="$value"
+      ;;
+    var_tags|tags)
+      var_tags="$value"
+      ;;
+    enable_fuse)
+      ENABLE_FUSE="$value"
+      ;;
+    enable_tun)
+      ENABLE_TUN="$value"
+      ;;
+    esac
+  done <"$cfg_path"
+
+  msg_ok "Loaded configuration from $cfg_path"
 }
 
 check_container_resources() {
@@ -1051,7 +1121,7 @@ check_container_storage() {
 }
 
 start() {
-  source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/tools.func)
+  source "$(require_vendor_file tools.func)"
   if command -v pveversion >/dev/null 2>&1; then
     install_script
   else
@@ -1113,9 +1183,9 @@ build_container() {
   TEMP_DIR=$(mktemp -d)
   pushd "$TEMP_DIR" >/dev/null
   if [ "$var_os" == "alpine" ]; then
-    export FUNCTIONS_FILE_PATH="$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/alpine-install.func)"
+    export FUNCTIONS_FILE_PATH="${VENDOR_DIR}/alpine-install.func"
   else
-    export FUNCTIONS_FILE_PATH="$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/install.func)"
+    export FUNCTIONS_FILE_PATH="${VENDOR_DIR}/install.func"
   fi
 
   export DIAGNOSTICS="$DIAGNOSTICS"
@@ -1150,7 +1220,7 @@ build_container() {
     $PW
   "
   # This executes create_lxc.sh and creates the container and .conf file
-  bash -c "$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/create_lxc.sh)" $?
+  bash "${VENDOR_DIR}/create_lxc.sh"
 
   LXC_CONFIG="/etc/pve/lxc/${CTID}.conf"
 
@@ -1344,7 +1414,12 @@ EOF'
   msg_ok "Customized LXC Container"
 
   # Modified to use iceteaSA/waydroid-proxmox repo instead of community-scripts
-  lxc-attach -n "$CTID" -- bash -c "$(curl -fsSL https://raw.githubusercontent.com/iceteaSA/waydroid-proxmox/main/install/${var_install}.sh)"
+  local install_script_path="${REPO_ROOT}/install/${var_install}.sh"
+  if [[ ! -f "$install_script_path" ]]; then
+    msg_error "Install script not found at $install_script_path"
+    exit 1
+  fi
+  lxc-attach -n "$CTID" -- bash -s <"$install_script_path"
 }
 
 # This function sets the description of the container.
