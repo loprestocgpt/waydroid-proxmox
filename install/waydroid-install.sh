@@ -163,6 +163,27 @@ cat > /usr/local/bin/start-waydroid.sh <<'EOFSCRIPT'
 
 set -e
 
+log_root() {
+    echo "[ROOT] $1"
+}
+
+log_user() {
+    echo "[WAYDROID] $1"
+}
+
+# Track container state for cleanup
+CONTAINER_STARTED=false
+
+# Ensure container stops cleanly when the service is stopped
+cleanup() {
+    if [ "$CONTAINER_STARTED" = "true" ]; then
+        log_root "Stopping Waydroid container..."
+        waydroid container stop || log_root "Waydroid container stop skipped (already stopped?)"
+    fi
+}
+
+trap cleanup EXIT
+
 # Setup environment for waydroid user (compositor runs as non-root)
 DISPLAY_USER="waydroid"
 DISPLAY_UID=$(id -u $DISPLAY_USER)
@@ -196,7 +217,7 @@ SOFTWARE_RENDERING="${SOFTWARE_RENDERING:-1}"
 # Start Sway compositor in headless mode as waydroid user
 # NOTE: WayVNC requires a wlroots-based compositor (Sway works, Weston doesn't)
 # NOTE: Sway refuses to run as root, so we run as waydroid user
-echo "Starting Sway compositor as $DISPLAY_USER in headless mode..."
+log_user "Starting Sway compositor (headless) as $DISPLAY_USER..."
 
 # Prepare environment for Sway (don't set WAYLAND_DISPLAY - let Sway choose)
 SWAY_ENV="XDG_RUNTIME_DIR=$DISPLAY_XDG_RUNTIME_DIR WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1"
@@ -220,7 +241,7 @@ su -c "$SWAY_ENV sway" $DISPLAY_USER &
 SWAY_PID=$!
 
 # Wait for Sway to create a Wayland socket (dynamically detect which one)
-echo "Waiting for Wayland socket creation..."
+log_user "Waiting for Wayland socket creation..."
 RETRY_COUNT=0
 MAX_RETRIES=30
 WAYLAND_DISPLAY=""
@@ -233,25 +254,25 @@ while [ -z "$WAYLAND_DISPLAY" ] && [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
     for socket in "$DISPLAY_XDG_RUNTIME_DIR"/wayland-*; do
         if [ -S "$socket" ]; then
             WAYLAND_DISPLAY=$(basename "$socket")
-            echo "Detected Wayland socket: $WAYLAND_DISPLAY"
+            log_user "Detected Wayland socket: $WAYLAND_DISPLAY"
             break
         fi
     done
 
     if [ -z "$WAYLAND_DISPLAY" ] && [ $((RETRY_COUNT % 5)) -eq 0 ]; then
-        echo "Still waiting for Wayland socket in $DISPLAY_XDG_RUNTIME_DIR... ($RETRY_COUNT/$MAX_RETRIES)"
+        log_user "Still waiting for Wayland socket in $DISPLAY_XDG_RUNTIME_DIR... ($RETRY_COUNT/$MAX_RETRIES)"
     fi
 done
 
 # Verify Sway started and socket exists
 if ! kill -0 $SWAY_PID 2>/dev/null; then
-    echo "ERROR: Sway failed to start"
+    log_user "ERROR: Sway failed to start"
     exit 1
 fi
 
 if [ -z "$WAYLAND_DISPLAY" ]; then
-    echo "ERROR: No Wayland socket found in $DISPLAY_XDG_RUNTIME_DIR after ${MAX_RETRIES}s"
-    echo "Checking DISPLAY_XDG_RUNTIME_DIR contents:"
+    log_user "ERROR: No Wayland socket found in $DISPLAY_XDG_RUNTIME_DIR after ${MAX_RETRIES}s"
+    log_user "Checking DISPLAY_XDG_RUNTIME_DIR contents:"
     ls -la "$DISPLAY_XDG_RUNTIME_DIR/" || true
     kill $SWAY_PID 2>/dev/null || true
     exit 1
@@ -259,7 +280,7 @@ fi
 
 export WAYLAND_DISPLAY
 SOCKET_PATH="$DISPLAY_XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
-echo "Wayland socket ready at $SOCKET_PATH"
+log_user "Wayland socket ready at $SOCKET_PATH"
 
 # Make the Wayland socket accessible to root for Waydroid
 # Create a symbolic link in root's XDG_RUNTIME_DIR
@@ -267,7 +288,7 @@ ln -sf "$SOCKET_PATH" "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
 chmod 777 "$SOCKET_PATH"
 
 # Start WayVNC with authentication as waydroid user
-echo "Starting WayVNC on port 5900 as $DISPLAY_USER..."
+log_user "Starting WayVNC on port 5900 as $DISPLAY_USER..."
 # WayVNC will connect to the Wayland socket via WAYLAND_DISPLAY environment variable
 # Use nohup to prevent SIGHUP when su exits
 WAYVNC_ENV="XDG_RUNTIME_DIR=$DISPLAY_XDG_RUNTIME_DIR WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
@@ -289,21 +310,21 @@ while [ $WAYVNC_RETRY -lt $WAYVNC_MAX_RETRIES ]; do
 done
 
 if [ "$WAYVNC_RUNNING" = "false" ]; then
-    echo "ERROR: WayVNC failed to start (port 5900 not listening)"
-    echo "Checking WayVNC requirements:"
-    echo "  WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
-    echo "  Socket exists: $([ -S "$SOCKET_PATH" ] && echo 'yes' || echo 'no')"
-    echo "  Sway running: $(kill -0 $SWAY_PID 2>/dev/null && echo 'yes' || echo 'no')"
-    kill $SWAY_PID 2>/dev/null || true
-    exit 1
+        log_user "ERROR: WayVNC failed to start (port 5900 not listening)"
+        log_user "Checking WayVNC requirements:"
+        log_user "  WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
+        log_user "  Socket exists: $([ -S "$SOCKET_PATH" ] && echo 'yes' || echo 'no')"
+        log_user "  Sway running: $(kill -0 $SWAY_PID 2>/dev/null && echo 'yes' || echo 'no')"
+        kill $SWAY_PID 2>/dev/null || true
+        exit 1
 fi
 
-echo "WayVNC started successfully and connected to Sway"
+log_user "WayVNC started successfully and connected to Sway"
 
 # Initialize Waydroid if needed (this downloads ~450MB on first run)
 if [ ! -d "/var/lib/waydroid/overlay" ]; then
-    echo "Initializing Waydroid (downloading Android images, ~450MB)..."
-    echo "This will take 5-10 minutes on first run..."
+    log_user "Initializing Waydroid (downloads Android images, ~450MB)..."
+    log_user "This will take 5-10 minutes on first run..."
     # Run waydroid init as waydroid user
     INIT_ENV="XDG_RUNTIME_DIR=$DISPLAY_XDG_RUNTIME_DIR WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
     if [ "${USE_GAPPS:-yes}" = "yes" ]; then
@@ -313,13 +334,15 @@ if [ ! -d "/var/lib/waydroid/overlay" ]; then
     fi
 fi
 
-# Start Waydroid container as waydroid user
-echo "Starting Waydroid container as $DISPLAY_USER..."
-WAYDROID_ENV="XDG_RUNTIME_DIR=$DISPLAY_XDG_RUNTIME_DIR WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
-su -c "$WAYDROID_ENV waydroid container start" $DISPLAY_USER
+# Start Waydroid container as root (system service responsibility)
+log_root "Starting Waydroid container as root..."
+waydroid container start
+CONTAINER_STARTED=true
 
 # Start Waydroid session as waydroid user
-echo "Starting Waydroid session as $DISPLAY_USER..."
+WAYDROID_ENV="XDG_RUNTIME_DIR=$DISPLAY_XDG_RUNTIME_DIR WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
+
+log_user "Starting Waydroid session as $DISPLAY_USER..."
 su -c "$WAYDROID_ENV waydroid session start" $DISPLAY_USER &
 SESSION_PID=$!
 
@@ -327,10 +350,11 @@ echo "========================================"
 echo "Waydroid started successfully!"
 echo "VNC: Port 5900"
 echo "Display User: $DISPLAY_USER"
-echo "Sway PID: $SWAY_PID"
-echo "Session PID: $SESSION_PID"
+echo "Sway PID (user): $SWAY_PID"
+echo "Session PID (user): $SESSION_PID"
 echo "Wayland Socket: $SOCKET_PATH"
-echo "Root Access: $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY (symlink)"
+echo "Root Wayland link: $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
+echo "Container lifecycle managed as root"
 echo "========================================"
 
 # Keep the script running and monitor child processes
