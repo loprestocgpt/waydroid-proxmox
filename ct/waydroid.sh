@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Use local build.func with our custom install script URL
-source <(curl -fsSL https://raw.githubusercontent.com/iceteaSA/waydroid-proxmox/main/misc/build.func)
+# Use vendored build.func to avoid network dependencies
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${REPO_ROOT}/misc/build.func"
 # Copyright (c) 2021-2025 community-scripts ORG
 # Author: iceteaSA
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE

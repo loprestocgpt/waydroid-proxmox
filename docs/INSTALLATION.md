@@ -182,11 +182,16 @@ pct enter 100  # Replace 100 with your CTID
 Inside the container, start the services:
 
 ```bash
-# Start Waydroid with VNC
+# Start the container, compositor/VNC bridge, UI, and API
+systemctl start waydroid-container
+systemctl enable waydroid-container
+
 systemctl start waydroid-vnc
 systemctl enable waydroid-vnc
 
-# Start Home Assistant API
+systemctl start waydroid-ui
+systemctl enable waydroid-ui
+
 systemctl start waydroid-api
 systemctl enable waydroid-api
 ```
@@ -205,6 +210,12 @@ Options:
 - `-s GAPPS`: Install Google Apps (Play Store, etc.)
 - `-f`: Force reinitialization
 
+### Service model & troubleshooting
+
+- **Wayland runtime**: The compositor and VNC bridge run as the `waydroid` user with `XDG_RUNTIME_DIR=/run/user/<uid>` and publish `/run/user/<uid>/wayland-1`. Restart `waydroid-vnc.service` if the socket is missing.
+- **Ordering**: `waydroid-container.service` starts first, `waydroid-vnc.service` prepares the Wayland/VNC stack, `waydroid-ui.service` launches the Waydroid UI, and `waydroid-api.service` depends on the stack being up.
+- **Doctor**: Run `scripts/doctor.sh` in the container to print the runtime directory/socket status, service states, listening ports (5900/8080), `waydroid status`, and the API health endpoint.
+
 ## Post-Installation
 
 ### Access Waydroid via VNC
@@ -213,7 +224,7 @@ Use any VNC client to connect:
 
 ```
 Host: <container-ip>:5900
-Password: (none - no authentication by default)
+Password: use /root/vnc-password.txt (generated during install)
 ```
 
 Recommended VNC clients:
