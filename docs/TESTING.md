@@ -524,6 +524,20 @@ main() {
 
 The HTML report can be customized by editing the CSS in the `generate_html_report()` function.
 
+## Waydroid Doctor
+
+Use the built-in doctor for a fast sanity check of critical components:
+
+```bash
+# Preferred inside the container (installed by default)
+waydroid-doctor.sh
+
+# From the repository checkout
+bash scripts/doctor.sh
+```
+
+It verifies binder/ashmem/binderfs availability, LXC device permissions for the `waydroid` user, required packages, Wayland socket presence, VNC port readiness, Waydroid runtime status, and API `/health` reachability. Failures include actionable guidance (for example, restarting `waydroid-container.service` or adding binder devices to the LXC config).
+
 ## Support
 
 For issues or questions:

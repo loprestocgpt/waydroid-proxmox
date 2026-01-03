@@ -66,6 +66,11 @@ Once complete, you'll receive:
 
 First boot takes 2-3 minutes while Android initializes.
 
+### Diagnostics
+
+- **Quick Doctor**: Run `waydroid-doctor.sh` inside the container for automated checks of binder/ashmem, permissions, Wayland/VNC readiness, Waydroid status, and API health.
+- **From the repo**: `bash scripts/doctor.sh` when the repository is available inside the container.
+
 ## Requirements
 
 ### Hardware
